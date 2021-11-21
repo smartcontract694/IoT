@@ -1,0 +1,177 @@
+pragma solidity =0.4.21; 
+
+contract IoTStreamingDevice {
+
+    
+    address public IoTOwner; //device owner
+    address IoTDevice = 0x583031D1113aD414F02576BD6afaBfb302140225;//EA of device
+    mapping(address=>bool) public RegisteredBidders;//bidders who are participants
+    //IoT Streaming Device Metadata
+    bytes32 public Metadata;
+    uint256 samplingPeriod;
+    //Bidding information
+    uint256 currentMaxBid;
+    uint256 CurremttimeStamp;
+    uint256 endBiddingTime;
+    uint256 biddingDuration;
+    address biddingWinner;
+    
+    enum contractState {created, advertisedForSale, biddingInProgress, someoneIsBiddingNow, biddingEnded, paymentReceivedByWinner, newOwner }
+    contractState public state;
+    
+ //constructor
+function IoTStreamingDevice() public{//the paramters Metadata and sampling are passed to the constructor.. for testing purposes they are just hardcoded
+    Metadata = '0x00aaff';//IPaddress, latitude and logitude, domainname, description This is used to save on Ether
+    samplingPeriod = 7; //7 seconds
+    IoTOwner = msg.sender;
+    state = contractState.created;
+    emit StreamingDeviceSCcreated(Metadata, samplingPeriod);
+}//Metadata = 80.217.28.59,20,14,org,VideoStreaming
+
+//events
+    event StreamingDeviceSCcreated(bytes32 metadata, uint256 samplingPeriod);
+    event NewSamplingPeriodAnnounced(uint samplingPeriod);
+    event NewMetaDataFieldsAnnounced(bytes32 metadata);
+    event StreamingDeviceAvailableForSale();
+    event BiddingCommenced(uint256 CurrentTimeStamp, uint dur, uint minBid);
+    event NewBidOffered(uint bid);
+    event BiddingEndedAnnounceOwner();
+    event PaymentReceivedFromNewOwner(address winner);
+    event NewOwnerAnnounced(address winner);
+    event RefundGranted();
+    event RefundDenied();
+    event DataChunkSent(uint timestampIndex,  uint chunckNum, bytes32 IPFShash);
+
+//Registration of bidders (participants)
+modifier OnlyDevice{
+     require(msg.sender == IoTDevice);
+      _;
+}
+modifier OnlyIoTOwner{
+      require(msg.sender == IoTOwner);
+      _;
+    }
+    
+modifier costs(){
+       assert(msg.value == (currentMaxBid * 1 ether));//must be in ether
+       _;
+   }   
+   
+   modifier OnlyBiddingWinner{
+       require(msg.sender == biddingWinner);
+       _;
+   }
+   
+    function RegisterBidder(address a) OnlyIoTOwner public{
+        RegisteredBidders[a]=true;
+    }
+   
+    function RevokeBidder(address a) OnlyIoTOwner public{
+        RegisteredBidders[a]=false;
+    }
+   
+    function restrictedFunction() public {
+        require(RegisteredBidders[msg.sender]);
+       
+    }
+///Done with functions used for registration
+    
+    //sampling period 
+    function ChangeSamplingPeriod(uint sp) OnlyIoTOwner public{
+        
+        samplingPeriod = sp;
+        emit NewSamplingPeriodAnnounced(sp);
+    }
+    
+    //metadata
+    function ChangeMetaDataFields(bytes32 md) OnlyIoTOwner public{
+        Metadata = md;
+        emit NewMetaDataFieldsAnnounced(md);
+    }
+
+//Bidding and selling functions
+
+    function AdvertiseStreamingDevice() OnlyIoTOwner public{
+        require(state == contractState.created);
+        emit StreamingDeviceAvailableForSale();
+        state = contractState.advertisedForSale;
+    }
+
+    function StartBidding(uint duration, uint minBid) OnlyIoTOwner public{
+        require(state == contractState.advertisedForSale);
+        //the bidders will have only till the time timeStampLimit to bid .. bidding stops after that
+        currentMaxBid = minBid;//initialize device current price
+        biddingWinner = msg.sender;//current owner
+        biddingDuration = duration;
+        CurremttimeStamp = block.timestamp; 
+        state = contractState.biddingInProgress;
+        emit BiddingCommenced(CurremttimeStamp, duration, minBid);
+    }
+    
+    function MakeaBid(uint bidAmount) public
+    {
+        require(RegisteredBidders[msg.sender] && (state > contractState.advertisedForSale && state < contractState.biddingEnded)
+        && (state != contractState.someoneIsBiddingNow));//anyone can try to bid as long as the device is still onsale
+         require(block.timestamp < (CurremttimeStamp + (biddingDuration * 1 minutes)));
+        state = contractState.someoneIsBiddingNow;//when we are inside the state changes
+        if(bidAmount > currentMaxBid)
+        {
+            currentMaxBid = bidAmount;
+            biddingWinner = msg.sender;
+            emit NewBidOffered(currentMaxBid);
+        }
+        state = contractState.biddingInProgress;//back to previous state to allow others to bid
+    }
+     function EndBidding() OnlyIoTOwner public
+     {
+         require(state == contractState.biddingInProgress);
+         require(block.timestamp <= (CurremttimeStamp + (biddingDuration * 1 minutes)));
+         endBiddingTime = block.timestamp;
+         state = contractState.biddingEnded;
+         emit BiddingEndedAnnounceOwner();
+     }
+    
+    function MakePayment() costs OnlyBiddingWinner payable public
+    {
+        require(state == contractState.biddingEnded);
+        emit PaymentReceivedFromNewOwner(msg.sender);
+        state = contractState.paymentReceivedByWinner;
+    }
+
+    function ChangeOwnership() OnlyIoTOwner public
+    {
+        require(state == contractState.paymentReceivedByWinner);
+        (msg.sender).transfer(currentMaxBid);//tranfer the ether to old owner (seller)
+        IoTOwner = biddingWinner;//change owner
+        emit NewOwnerAnnounced(biddingWinner);
+        state = contractState.newOwner;
+    }
+    
+    function RefundBid() OnlyBiddingWinner public
+    {
+        require(state == contractState.paymentReceivedByWinner);//payment received but old owner did not change ownership
+        if(block.timestamp >= (endBiddingTime + 10 minutes)){
+            (biddingWinner).transfer(currentMaxBid);//refund amount to the bidder
+            emit RefundGranted();
+            state = contractState.created;//back to initial state
+        }
+        else{
+            emit RefundDenied();
+        }
+        
+    }
+     //Use the following argument (SHA256) for testing the IPFShash
+    //0x64EC88CA00B268E5BA1A35678A1B5316D212F4F366B2477232534A8AECA37F3C
+    //["0x64","0xEC","0x88","0xCA","0x00","0xB2","0x68","0xE5","0xBA","0x1A","0x35","0x67","0x8A","0x1B","0x53","0x16","0xD2","0x12","0xF4","0xF3","0x66","0xB2","0x47","0x72","0x32","0x53","0x4A","0x8A","0xEC","0xA3","0x7F","0x3C"]
+
+//0x0000000000000000000000000000000000000000000000000000006d6168616d
+
+  //passing an address in the testing should be in double quotes  "....."
+  function SendDataChunk( uint timestampIndex, uint chunckNum, bytes32 IPFShash) OnlyDevice public {
+       emit DataChunkSent( timestampIndex,  chunckNum, IPFShash);
+    }
+
+
+   
+}
+
